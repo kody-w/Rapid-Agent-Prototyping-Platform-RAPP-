@@ -36,3 +36,4 @@ deployment/
 .vscode/tasks.json
 run.bat
 run.ps1
+PATENT_SPECIFICATION.md

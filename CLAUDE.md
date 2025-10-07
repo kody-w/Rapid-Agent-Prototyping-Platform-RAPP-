@@ -4,67 +4,88 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is **Copilot Agent 365** - an enterprise AI assistant platform built on Azure Functions that provides a modular agent system with persistent memory management. The system is designed for rapid deployment and agent prototyping with Azure OpenAI integration.
+**Rapid Agent Prototyping Platform (RAPP)** - A self-evolving AI assistant framework built on Azure Functions that enables dynamic capability acquisition without code deployment. The system features runtime agent loading from Azure File Storage, a dual-tier memory architecture (shared + user-specific contexts), and conversational programming capabilities.
 
 ## Development Commands
 
-### Running Locally
+### Local Development
 ```bash
-# Activate virtual environment and start the function
+# Start the function (automatically activates virtual environment)
 ./run.sh
 
-# Or manually:
+# Or manually
 source .venv/bin/activate  # Unix/macOS
-# or
-source .venv/Scripts/activate  # Windows/Git Bash
 func start
-```
 
-The local API will be available at: `http://localhost:7071/api/businessinsightbot_function`
-
-### Installing Dependencies
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
+Local API endpoint: `http://localhost:7071/api/businessinsightbot_function`
+
+### Testing the API
+```bash
+# Basic interaction
+curl -X POST http://localhost:7071/api/businessinsightbot_function \
+  -H "Content-Type: application/json" \
+  -d '{"user_input": "Hello", "conversation_history": []}'
+
+# With user GUID for context
+curl -X POST http://localhost:7071/api/businessinsightbot_function \
+  -H "Content-Type: application/json" \
+  -d '{"user_input": "Hello", "conversation_history": [], "user_guid": "your-guid-here"}'
+```
+
 ### Azure Deployment
-The project uses ARM template deployment via `azuredeploy.json` and generates platform-specific setup scripts automatically.
+Deploy via ARM template: `azuredeploy.json` generates platform-specific setup scripts automatically. Click "Deploy to Azure" button in README.md.
 
-## Architecture Overview
+## Architecture
 
-### Core Components
+### Core Request Flow (function_app.py)
 
-1. **Azure Function Entry Point** (`function_app.py`):
-   - HTTP-triggered function with CORS support
-   - Handles user requests with conversation history
-   - Manages user GUIDs for personalized memory contexts
-   - Uses a default GUID (`c0p110t0-aaaa-bbbb-cccc-123456789abc`) when no specific user is identified
+1. **HTTP Request Entry** (function_app.py:621)
+   - CORS handling for cross-origin requests
+   - JSON payload validation: requires `user_input` and `conversation_history`
+   - Optional `user_guid` parameter for user-specific memory context
 
-2. **Agent System** (`agents/`):
-   - Base class: `BasicAgent` - All agents inherit from this
-   - Dynamic agent loading from both local `agents/` folder and Azure File Storage
-   - Agents are registered with metadata describing their capabilities
-   - Supports multi-agent workflows loaded from `multi_agents/` in Azure storage
+2. **Dynamic Agent Loading** (function_app.py:85-206)
+   - Scans local `agents/` folder for agent classes
+   - Loads agents from Azure File Storage `agents/` directory at runtime
+   - Loads multi-agent workflows from `multi_agents/` directory
+   - All agents must inherit from `BasicAgent` and have `metadata` property
 
-3. **Memory Management** (`utils/azure_file_storage.py`):
-   - `AzureFileStorageManager` handles persistent storage in Azure Files
-   - Two-tier memory system:
-     - Shared memories: Available to all users (`shared_memories/`)
-     - User-specific memories: Isolated per GUID (`memory/{guid}/`)
-   - Automatic memory context switching based on user GUID
+3. **Assistant Initialization** (function_app.py:208-246)
+   - Azure OpenAI client setup using environment variables
+   - Memory context initialization (defaults to `c0p110t0-aaaa-bbbb-cccc-123456789abc`)
+   - Loads both shared and user-specific memories with `full_recall=True`
 
-4. **Assistant Core Logic**:
-   - Integrates with Azure OpenAI for natural language processing
-   - Function calling mechanism to invoke agents dynamically
-   - Dual response format: formatted text and voice-optimized response
-   - Memory synthesis from both shared and user-specific contexts
+4. **Response Generation** (function_app.py:479-617)
+   - GUID extraction from prompt or history (function_app.py:248-262, 303-322)
+   - Memory context switching if new GUID detected
+   - Conversation history limited to last 20 messages to prevent memory issues
+   - Azure OpenAI function calling for agent invocation
+   - Automatic retry mechanism (max 3 retries with 2-second delay)
 
-### Agent Development Pattern
+### Memory System (utils/azure_file_storage.py)
 
-New agents should follow this structure:
+**Two-Tier Architecture:**
+- **Shared Memory**: `shared_memories/memory.json` - accessible to all users
+- **User-Specific Memory**: `memory/{guid}/user_memory.json` - isolated per GUID
+
+**Key Operations:**
+- `set_memory_context(guid)` - switches between shared and user-specific storage
+- `read_json()` / `write_json(data)` - handles current context automatically
+- Memory format: UUID-keyed dictionaries with `{conversation_id, session_id, message, mood, theme, date, time}`
+
+**Context Switching:**
+- GUID validation: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+- Falls back to shared memory on invalid GUID or errors
+- Directories created lazily only when valid GUID provided
+
+### Agent System
+
+**Base Class Pattern (agents/basic_agent.py):**
 ```python
-from agents.basic_agent import BasicAgent
-
 class YourAgent(BasicAgent):
     def __init__(self):
         self.name = 'YourAgentName'
@@ -74,39 +95,132 @@ class YourAgent(BasicAgent):
             "parameters": {
                 "type": "object",
                 "properties": {
-                    # Define parameters here
+                    "param_name": {
+                        "type": "string",
+                        "description": "Parameter description"
+                    }
                 },
-                "required": []
+                "required": ["param_name"]
             }
         }
         super().__init__(self.name, self.metadata)
 
     def perform(self, **kwargs):
-        # Implementation logic
-        return result
+        # Implementation
+        return result_string
 ```
 
-## Configuration Requirements
+**Built-in Agents:**
+- `ContextMemory` - Retrieves stored memories with filtering options
+- `ManageMemory` - Stores new memories with type categorization
 
-The following environment variables must be set (typically in `local.settings.json` for local development):
+**Agent Parameters:**
+- `user_guid` automatically injected for `ManageMemory` and `ContextMemory` agents (function_app.py:555-556)
+- Parameters sanitized to convert `None` to empty strings (function_app.py:546-551)
+- Results must be strings or convertible to strings
 
-- `AZURE_OPENAI_API_KEY`: Azure OpenAI service key
-- `AZURE_OPENAI_ENDPOINT`: Azure OpenAI endpoint URL
-- `AZURE_OPENAI_DEPLOYMENT_NAME`: Deployment name (e.g., 'gpt-deployment')
-- `AZURE_OPENAI_API_VERSION`: API version (default: '2024-02-01')
-- `AzureWebJobsStorage`: Azure Storage connection string
-- `AZURE_FILES_SHARE_NAME`: File share name for memory storage
-- `ASSISTANT_NAME`: Bot's display name
-- `CHARACTERISTIC_DESCRIPTION`: Bot's personality description
+### Response Format (function_app.py:391-422)
+
+All assistant responses must contain two parts separated by `|||VOICE|||`:
+
+1. **Formatted Response** (before delimiter):
+   - Full markdown formatting with **bold**, `code`, headings, lists
+   - Detailed information and structure
+
+2. **Voice Response** (after delimiter):
+   - 1-2 sentences maximum
+   - Plain text, no formatting
+   - Conversational tone for audio playback
+
+Example: `"**Result:** Success\n\n|||VOICE|||\nThe operation completed successfully."`
+
+### Runtime Agent Loading
+
+**Discovery Mechanism:**
+- Local: `agents/*.py` (excluding `__init__.py` and `basic_agent.py`)
+- Azure Storage: `agents/*_agent.py`
+- Multi-agents: `multi_agents/*_agent.py`
+
+**Hot-Loading Process:**
+1. Download agent code from Azure File Storage
+2. Write to `/tmp/agents/` or `/tmp/multi_agents/`
+3. Dynamically import using `importlib.util.spec_from_file_location`
+4. Instantiate and register agent
+5. Clean up temporary file
+
+**No restarts required** - agents are loaded on each function invocation.
+
+## Configuration
+
+Required environment variables in `local.settings.json`:
+
+```json
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;...",
+    "AZURE_FILES_SHARE_NAME": "your-share-name",
+    "AZURE_OPENAI_API_KEY": "your-key",
+    "AZURE_OPENAI_ENDPOINT": "https://your-endpoint.openai.azure.com/",
+    "AZURE_OPENAI_DEPLOYMENT_NAME": "your-deployment",
+    "AZURE_OPENAI_API_VERSION": "2024-02-01",
+    "ASSISTANT_NAME": "Your Assistant Name",
+    "CHARACTERISTIC_DESCRIPTION": "helpful assistant"
+  }
+}
+```
+
+**NEVER commit `local.settings.json`** - it's in `.gitignore` and contains secrets.
 
 ## Important Implementation Details
 
-1. **GUID Handling**: The system uses GUIDs to maintain separate conversation contexts. If no GUID is provided, it defaults to a common GUID for shared context.
+### GUID Handling
+- Default GUID: `c0p110t0-aaaa-bbbb-cccc-123456789abc` (function_app.py:19)
+- GUID-only messages trigger memory context switching without response generation
+- GUIDs extracted from first message in history or current prompt
+- Format: `guid: your-guid-here` or just the GUID alone
 
-2. **Memory Initialization**: Memory contexts are loaded with `full_recall=True` to ensure complete context is available for conversations.
+### Memory Context Persistence
+- Each Assistant instance starts with default GUID memory loaded
+- Context switches when new GUID detected in request
+- `full_recall=True` ensures complete memory loads during initialization
+- Shared and user memories loaded simultaneously for comprehensive context
 
-3. **Dynamic Agent Loading**: Agents can be deployed to Azure File Storage without redeploying the function app - they're loaded at runtime.
+### Function Calling Flow
+1. Azure OpenAI generates function call with agent name and parameters
+2. Agent lookup in `known_agents` dictionary
+3. Parameter sanitization (None → empty string)
+4. Agent execution via `perform(**kwargs)`
+5. Result appended to messages as `{"role": "function", "name": agent_name, "content": result}`
+6. Follow-up call to OpenAI for natural language response
+7. Response parsed into formatted and voice components
 
-4. **Response Format**: All responses include both a formatted version (with markdown) and a voice-optimized version (plain text, 1-2 sentences).
+### Error Handling
+- API retries: 3 attempts with 2-second delays
+- Memory operation failures fall back to shared memory
+- Conversation history trimming prevents memory exhaustion
+- Comprehensive logging via Python `logging` module
 
-5. **Error Handling**: Comprehensive error handling with retries for OpenAI API calls and graceful fallbacks for memory operations.
+### Python Version
+- **Use Python 3.9-3.11** (3.11 recommended)
+- **Avoid Python 3.13+** due to Azure Functions compatibility issues
+
+## Testing
+
+### Web Interface
+Open `index.html` in a browser for a chat interface to the local or deployed function.
+
+### Direct API Testing
+Use curl, Postman, or any HTTP client with:
+- Method: `POST`
+- Headers: `Content-Type: application/json`
+- Body: `{"user_input": "your message", "conversation_history": []}`
+
+### Agent Development
+1. Create new agent class in `agents/` or upload to Azure Storage `agents/`
+2. Inherit from `BasicAgent`
+3. Define `name` and `metadata` in `__init__`
+4. Implement `perform(**kwargs)` method
+5. Return string results
+6. Test by invoking function (no restart needed for Azure Storage agents)
